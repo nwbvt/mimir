@@ -1,87 +1,115 @@
 import torch
+import random
+from dataclasses import dataclass
+from typing import Type
 from torch.utils.data import DataLoader
+from torch import nn, optim
 
-class Trainer(object):
+DEVICE = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
-    def __init__(self, data, model, loss_fn, optimizer, device="cpu", seed=0, train_size=0.9, metrics={}, batch_size=128):
-        generator = None
-        if seed:
-            generator = torch.Generator().manual_seed(seed)
-            torch.manual_seed(seed)
-        train_data, test_data = torch.utils.data.random_split(data, [train_size, 1-train_size],
-                                                              generator=generator)
-        self.train_data = DataLoader(train_data, batch_size=batch_size)
-        self.test_data = DataLoader(test_data, batch_size=batch_size)
-        self.model = model.to(device)
-        self.loss_fn = loss_fn
-        self.optimizer = optimizer
-        self.device = device
-        self.metrics = metrics
+@dataclass
+class HyperParameters:
+    model_params: map
+    optimizer_params: map
 
-    def eval(self, x, y):
-        x = x.to(self.device)
-        y = y.to(self.device)
-        return self.model(x)
+def train_epoch(model: nn.Module, data: DataLoader,
+                loss_fn: nn.Module, optimizer: optim.Optimizer,
+                device:str, log:bool):
+    model.train()
+    size = len(data)
+    for batch, (x, y) in enumerate(data):
+        x = x.to(device)
+        y = y.to(device)
+        preds = model(x)
+        loss = loss_fn(preds, y)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        if log and batch % 100 == 0:
+            loss = loss.item()
+            current = (batch + 1) * len(x)
+            print(f"loss: {loss:>7f}, [{current:>6d}/{size:>6d}]", end="\r")
 
-    def train_epoch(self, log=True):
-        size = len(self.train_data.dataset)
-        self.model.train()
-        for batch, (x, y) in enumerate(self.train_data):
-            pred = self.eval(x, y)
-            loss = self.loss_fn(pred, y.to(self.device))
-            loss.backward()
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            if batch % 100 == 0 and log:
-                print(f"loss: {loss:>7f} [{batch * len(x):>6d}/{size:>6d}]", end="\r")
+def test(model: nn.Module, data: DataLoader, loss_fn: nn.Module,
+         device: str=DEVICE, metrics: map={}):
+    model.eval()
+    metric_values = {name: 0 for name, _ in metrics.items()}
+    loss = 0
+    size = len(data)
+    with torch.no_grad():
+        for x, y in data:
+            x = x.to(device)
+            y = y.to(device)
+            preds = model(x)
+            loss += loss_fn(preds, y) * len(x)
+            for name, metric in metrics.items():
+                metric_values[name] += metric(preds, y) * len(x)
+    loss /= size
+    metric_values = {name: value/size for name, value in metric_values}
+    return loss, metric_values
 
-    def test(self, train_data=False):
-        data = self.train_data if train_data else self.test_data
-        size = len(data.dataset)
-        num_batches = len(data)
-        self.model.eval()
-        loss = 0
-        metric_results = {name: 0 for name in self.metrics}
-        with torch.no_grad():
-            for x, y in data:
-                pred = self.eval(x, y)
-                loss = self.loss_fn(pred, y.to(self.device))
-                if self.metrics:
-                    for name, metric in self.metrics.items():
-                        metric_results[name] += metric(x, pred)
-        loss /= num_batches
-        metric_results = [result/num_batches for result in metric_results]
-        return loss, metric_results
+class Result:
+    def __init__(self):
+        self.min_loss = None
+        self.train_losses = []
+        self.train_metrics = []
+        self.val_losses = []
+        self.val_metrics = []
 
-    def train(self, max_epochs, max_streak=10, log=True):
-        best_params = None
-        best_loss = None
-        streak_len = 0
-        for i in range(0, max_epochs):
-            if log:
-                print(f"Epoch {i}")
-            self.train_epoch(log)
-            train_loss, train_metrics = self.test(True)
-            if log:
-                print(f"  Train: Loss={train_loss}", end="")
-                if train_metrics:
-                    for name, metric in train_metrics.items():
-                        print(f" {name}={metric}", end="")
-                print("")
-            test_loss, test_metrics = self.test(False)
-            if log:
-                print(f"  Test:  Loss={test_loss}", end="")
-                if test_metrics:
-                    for name, metric in test_metrics.items():
-                        print(f" {name}={metric}", end="")
-                print("")
-            if (best_loss is None) or (test_loss < best_loss):
-                streak_len = 0
-                best_loss = test_loss
-                best_params = self.model.state_dict()
-            else:
-                streak_len += 1
-                if streak_len >= max_streak:
-                    break
-        self.model.load_state_dict(best_params)
-        return self.model
+    def _add_result(self, loss:float, metric_results:map, train:bool):
+        if train:
+            losses = self.train_losses
+            metrics = self.train_metrics
+        else:
+            losses = self.val_losses
+            metrics = self.val_metrics
+        losses.append(loss)
+        metrics.append(metric_results)
+
+    def add_train_result(self, loss:float, metric_results:map):
+        self._add_result(loss, metric_results, True)
+
+    def add_val_result(self, loss:float, metric_results:map):
+        self._add_result(loss, metric_results, False)
+        if self.min_loss is None or loss <= self.min_loss:
+            self.min_loss = loss
+            return True
+        return False
+
+def train(data: DataLoader, model_class: Type[nn.Module], hyper_params: HyperParameters, loss_fn: nn.Module,
+          name: str="model", max_epochs: int=100, max_streak: int=5, optimizer_class: Type[optim.Optimizer]=optim.Adam,
+          seed: int=0, device: str=DEVICE, train_size: float=0.9, metrics:map={}, batch_size:int=128, log:bool=True):
+    fname=f"{name}.pth"
+    generator = None
+    if seed:
+        generator = torch.Generator().manual_seed(seed)
+        torch.manual_seed(seed)
+        random.seed(seed)
+    model = model_class(**hyper_params.model_params).to(device)
+    optimizer = optimizer_class(model.parameters(), **hyper_params.optimizer_params)
+    train_split, val_split = torch.utils.data.random_split(data, [train_size, 1-train_size], generator)
+    train_data = DataLoader(train_split, batch_size=batch_size)
+    val_data = DataLoader(val_split, batch_size=batch_size)
+    results = Result()
+    results.add_train_result(*test(model, train_data, loss_fn, device, metrics))
+    results.add_val_result(*test(model, val_data, loss_fn, device, metrics))
+    streak = 0 # Number of times the train loss has not improved
+    for i in range(max_epochs):
+        train_epoch(model, train_data, loss_fn, optimizer, device, log)
+        results.add_train_result(*test(model, train_data, loss_fn, device, metrics))
+        improved = results.add_val_result(*test(model, val_data, loss_fn, device, metrics))
+        if log:
+            out = f"Epoch {i:3d}: Loss={results.train_losses[-1]:>3.5f} train, {results.val_losses[-1]:>3.5f} val"
+            for metric in metrics:
+                out += f"{metric}={results.train_metrics[-1][metric]:>3.5f} train, {results.val_metrics[-1][metric]:>3.5f} val"
+            print(out)
+        if improved:
+            streak = 0
+            torch.save(model.state_dict(), fname)
+        else:
+            streak += 1
+            if streak >= max_streak:
+                break
+
+    model.load_state_dict(torch.load(fname))
+    return results, model
