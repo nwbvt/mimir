@@ -12,12 +12,12 @@ class HyperParameters:
     model_params: map
     optimizer_params: map
 
-def train_epoch(model: nn.Module, data: DataLoader,
-                loss_fn: nn.Module, optimizer: optim.Optimizer,
-                device:str, log:bool):
+def train_epoch(model: nn.Module, data: DataLoader, loss_fn: nn.Module, optimizer: optim.Optimizer,
+                batch_size: int=128, device: str=DEVICE, log: bool=True):
     model.train()
     size = len(data)
-    for batch, (x, y) in enumerate(data):
+    loader = DataLoader(data, batch_size=batch_size)
+    for batch, (x, y) in enumerate(loader):
         x = x.to(device)
         y = y.to(device)
         preds = model(x)
@@ -30,14 +30,15 @@ def train_epoch(model: nn.Module, data: DataLoader,
             current = (batch + 1) * len(x)
             print(f"loss: {loss:>7f}, [{current:>6d}/{size:>6d}]", end="\r")
 
-def test(model: nn.Module, data: DataLoader, loss_fn: nn.Module,
+def test(model: nn.Module, data: DataLoader, loss_fn: nn.Module, batch_size: int=128,
          device: str=DEVICE, metrics: map={}):
     model.eval()
     metric_values = {name: 0 for name, _ in metrics.items()}
     loss = 0
     size = len(data)
+    loader = DataLoader(data, batch_size=batch_size)
     with torch.no_grad():
-        for x, y in data:
+        for x, y in loader:
             x = x.to(device)
             y = y.to(device)
             preds = model(x)
@@ -87,17 +88,15 @@ def train(data: DataLoader, model_class: Type[nn.Module], hyper_params: HyperPar
         random.seed(seed)
     model = model_class(**hyper_params.model_params).to(device)
     optimizer = optimizer_class(model.parameters(), **hyper_params.optimizer_params)
-    train_split, val_split = torch.utils.data.random_split(data, [train_size, 1-train_size], generator)
-    train_data = DataLoader(train_split, batch_size=batch_size)
-    val_data = DataLoader(val_split, batch_size=batch_size)
+    train_data, val_data = torch.utils.data.random_split(data, [train_size, 1-train_size], generator)
     results = Result()
-    results.add_train_result(*test(model, train_data, loss_fn, device, metrics))
-    results.add_val_result(*test(model, val_data, loss_fn, device, metrics))
+    results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics))
+    results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics))
     streak = 0 # Number of times the train loss has not improved
     for i in range(max_epochs):
-        train_epoch(model, train_data, loss_fn, optimizer, device, log)
-        results.add_train_result(*test(model, train_data, loss_fn, device, metrics))
-        improved = results.add_val_result(*test(model, val_data, loss_fn, device, metrics))
+        train_epoch(model, train_data, loss_fn, optimizer, batch_size, device, log)
+        results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics))
+        improved = results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics))
         if log:
             out = f"Epoch {i:3d}: Loss={results.train_losses[-1]:>3.5f} train, {results.val_losses[-1]:>3.5f} val"
             for metric in metrics:
