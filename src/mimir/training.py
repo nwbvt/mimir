@@ -73,7 +73,7 @@ class Result:
 
     def add_val_result(self, loss:float, metric_results:map):
         self._add_result(loss, metric_results, False)
-        if self.min_loss is None or loss <= self.min_loss:
+        if self.min_loss is None or loss < self.min_loss:
             self.min_loss = loss
             return True
         return False
@@ -87,7 +87,7 @@ def _pad_collate(data):
 def train(data: Dataset, model_class: Type[nn.Module], hyper_params: HyperParameters, loss_fn: nn.Module,
           name: str="model", max_epochs: int=100, max_streak: int=5, optimizer_class: Type[optim.Optimizer]=optim.Adam,
           seed: int=0, device: str=DEVICE, train_size: float=0.9, metrics:map={},
-          batch_size:int=128, log:bool=True, pad: bool=False):
+          batch_size:int=128, pad: bool=False, log:bool=True, include_train_results=True):
     fname=f"{name}.pth"
     generator = None
     if seed:
@@ -99,17 +99,23 @@ def train(data: Dataset, model_class: Type[nn.Module], hyper_params: HyperParame
     optimizer = optimizer_class(model.parameters(), **hyper_params.optimizer_params)
     train_data, val_data = torch.utils.data.random_split(data, [train_size, 1-train_size], generator)
     results = Result()
-    results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics, collate_fn))
+    if include_train_results:
+        results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics, collate_fn))
     results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics, collate_fn))
     streak = 0 # Number of times the train loss has not improved
     for i in range(max_epochs):
         train_epoch(model, train_data, loss_fn, optimizer, batch_size, device, log, collate_fn)
-        results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics, collate_fn))
+        if include_train_results:
+            results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics, collate_fn))
         improved = results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics, collate_fn))
         if log:
-            out = f"Epoch {i:3d}: Loss={results.train_losses[-1]:>3.5f} train, {results.val_losses[-1]:>3.5f} val"
+            out = f"Epoch {i:3d}: Loss={results.val_losses[-1]:>3.5f} "
+            if include_train_results:
+                out += f"val, {results.train_losses[-1]:>3.5f} train "
             for metric in metrics:
-                out += f"{metric}={results.train_metrics[-1][metric]:>3.5f} train, {results.val_metrics[-1][metric]:>3.5f} val"
+                out += f"{metric}={results.val_metrics[-1][metric]:>3.5f} val "
+                if include_train_results:
+                    out += f"val {results.train_metrics[-1][metric]:>3.5f} train "
             print(out)
         if improved:
             streak = 0
