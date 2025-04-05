@@ -1,8 +1,9 @@
 import torch
 import random
 from dataclasses import dataclass
-from typing import Type
-from torch.utils.data import DataLoader
+from typing import Type, Callable
+from torch.utils.data import DataLoader, Dataset
+from torch.nn.utils.rnn import pad_sequence
 from torch import nn, optim
 
 DEVICE = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
@@ -13,10 +14,10 @@ class HyperParameters:
     optimizer_params: map
 
 def train_epoch(model: nn.Module, data: DataLoader, loss_fn: nn.Module, optimizer: optim.Optimizer,
-                batch_size: int=128, device: str=DEVICE, log: bool=True):
+                batch_size: int=128, device: str=DEVICE, log: bool=True, collate_fn: Callable=None):
     model.train()
     size = len(data)
-    loader = DataLoader(data, batch_size=batch_size)
+    loader = DataLoader(data, batch_size=batch_size, collate_fn=collate_fn)
     for batch, (x, y) in enumerate(loader):
         x = x.to(device)
         y = y.to(device)
@@ -31,12 +32,12 @@ def train_epoch(model: nn.Module, data: DataLoader, loss_fn: nn.Module, optimize
             print(f"loss: {loss:>7f}, [{current:>6d}/{size:>6d}]", end="\r")
 
 def test(model: nn.Module, data: DataLoader, loss_fn: nn.Module, batch_size: int=128,
-         device: str=DEVICE, metrics: map={}):
+         device: str=DEVICE, metrics: map={}, collate_fn: Callable=None):
     model.eval()
     metric_values = {name: 0 for name, _ in metrics.items()}
     loss = 0
     size = len(data)
-    loader = DataLoader(data, batch_size=batch_size)
+    loader = DataLoader(data, batch_size=batch_size, collate_fn=collate_fn)
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device)
@@ -77,26 +78,34 @@ class Result:
             return True
         return False
 
-def train(data: DataLoader, model_class: Type[nn.Module], hyper_params: HyperParameters, loss_fn: nn.Module,
+def _pad_collate(data):
+    x,y = zip(*data)
+    x = pad_sequence(x, batch_first=True)
+    y = torch.stack(y)
+    return x, y
+
+def train(data: Dataset, model_class: Type[nn.Module], hyper_params: HyperParameters, loss_fn: nn.Module,
           name: str="model", max_epochs: int=100, max_streak: int=5, optimizer_class: Type[optim.Optimizer]=optim.Adam,
-          seed: int=0, device: str=DEVICE, train_size: float=0.9, metrics:map={}, batch_size:int=128, log:bool=True):
+          seed: int=0, device: str=DEVICE, train_size: float=0.9, metrics:map={},
+          batch_size:int=128, log:bool=True, pad: bool=False):
     fname=f"{name}.pth"
     generator = None
     if seed:
         generator = torch.Generator().manual_seed(seed)
         torch.manual_seed(seed)
         random.seed(seed)
+    collate_fn = _pad_collate if pad else None
     model = model_class(**hyper_params.model_params).to(device)
     optimizer = optimizer_class(model.parameters(), **hyper_params.optimizer_params)
     train_data, val_data = torch.utils.data.random_split(data, [train_size, 1-train_size], generator)
     results = Result()
-    results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics))
-    results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics))
+    results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics, collate_fn))
+    results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics, collate_fn))
     streak = 0 # Number of times the train loss has not improved
     for i in range(max_epochs):
-        train_epoch(model, train_data, loss_fn, optimizer, batch_size, device, log)
-        results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics))
-        improved = results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics))
+        train_epoch(model, train_data, loss_fn, optimizer, batch_size, device, log, collate_fn)
+        results.add_train_result(*test(model, train_data, loss_fn, batch_size, device, metrics, collate_fn))
+        improved = results.add_val_result(*test(model, val_data, loss_fn, batch_size, device, metrics, collate_fn))
         if log:
             out = f"Epoch {i:3d}: Loss={results.train_losses[-1]:>3.5f} train, {results.val_losses[-1]:>3.5f} val"
             for metric in metrics:
