@@ -53,6 +53,7 @@ def test(model: nn.Module, data: DataLoader, loss_fn: nn.Module, batch_size: int
 class Result:
     def __init__(self):
         self.min_loss = None
+        self.best_epoch = -1
         self.train_losses = []
         self.train_metrics = []
         self.val_losses = []
@@ -75,8 +76,12 @@ class Result:
         self._add_result(loss, metric_results, False)
         if self.min_loss is None or loss < self.min_loss:
             self.min_loss = loss
+            self.best_epoch = len(self.val_losses) - 1
             return True
         return False
+
+    def best_results(self):
+        return self.val_losses[self.best_epoch], self.val_metrics[self.best_epoch]
 
 def _pad_collate(data):
     x,y = zip(*data)
@@ -126,4 +131,10 @@ def train(data: Dataset, model_class: Type[nn.Module], hyper_params: HyperParame
                 break
 
     model.load_state_dict(torch.load(fname))
+    if log:
+        loss, metrics = results.best_results()
+        out = f"Final results: Loss={loss} "
+        for metric in metrics:
+            out += f"{metric}={metrics[metric]:>3.5f} "
+        print(out)
     return results, model
