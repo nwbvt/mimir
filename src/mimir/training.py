@@ -47,7 +47,7 @@ def test(model: nn.Module, data: DataLoader, loss_fn: nn.Module, batch_size: int
             for name, metric in metrics.items():
                 metric_values[name] += metric(preds, y) * len(x)
     loss /= size
-    metric_values = {name: value/size for name, value in metric_values}
+    metric_values = {name: value/size for name, value in metric_values.items()}
     return loss, metric_values
 
 class Result:
@@ -113,7 +113,7 @@ def train(data: Dataset, model_class: Type[nn.Module], hyper_params: HyperParame
             if include_train_results:
                 out += f"val, {results.train_losses[-1]:>3.5f} train "
             for metric in metrics:
-                out += f"{metric}={results.val_metrics[-1][metric]:>3.5f} val "
+                out += f"{metric}={results.val_metrics[-1][metric]:>3.5f} "
                 if include_train_results:
                     out += f"val {results.train_metrics[-1][metric]:>3.5f} train "
             print(out)
